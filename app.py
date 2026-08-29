@@ -1,5 +1,4 @@
 import asyncio
-import glob
 import json
 import os
 import threading
@@ -24,8 +23,8 @@ THREADS_PER_CONN = int(os.environ.get("THREADS_PER_CONN", "1"))
 DUPLICATE_CAP = int(os.environ.get("DUPLICATE_CAP", "2"))
 HF_TOKEN = os.environ.get("HF_TOKEN", "")
 
-# Remote Bucket Base URL
-BASE_URL = "https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve"
+# Correct Hugging Face Datasets Base URL
+BASE_URL = "https://huggingface.co/datasets/CutehackX/hitek-data-bucket/resolve/main"
 
 PARQUET_FILES = [
     f"{BASE_URL}/part1.parquet",
@@ -48,7 +47,7 @@ NUMBER_FIELDS = ["phoneNumber", "aadharNumber", "otherNumber"]
 app = FastAPI(
     title="High-Performance Parquet Gateway",
     description="DuckDB-backed search API optimized for cloud containers",
-    version="2.2.0"
+    version="2.3.0"
 )
 
 # ---------------------------------------------------------
@@ -91,10 +90,13 @@ def _create_connection() -> duckdb.DuckDBPyConnection:
 def _get_worker_conn() -> duckdb.DuckDBPyConnection:
     """Thread-safe connection retriever that avoids index out of range races."""
     tid = getattr(_thread_local, "id", None)
+    
+    # Fast path: check if thread already has a valid connection
     if tid is not None and tid < len(_conns):
         return _conns[tid]
 
     with _conns_lock:
+        # Double-check inside the lock
         tid = getattr(_thread_local, "id", None)
         if tid is not None and tid < len(_conns):
             return _conns[tid]
@@ -227,6 +229,9 @@ async def _unified_search(q: str, limit: int, source: str | None = None) -> dict
                 if res.get("results"):
                     rows.extend(res["results"])
                     searched_fields.append(fld)
+                elif res.get("error_message"):
+                    # Bubble up the connection error if the first query fails
+                    return {"query": cleaned_q, "error": res["error_message"]}
 
         final_results = _apply_deduplication(rows, DUPLICATE_CAP)[:limit]
         return {
@@ -247,7 +252,10 @@ async def _unified_search(q: str, limit: int, source: str | None = None) -> dict
         ]
         executed_tasks = await asyncio.gather(*tasks)
         combined_rows: list[dict[str, Any]] = []
+        
         for task_res in executed_tasks:
+            if task_res.get("error_message"):
+                return {"query": cleaned_q, "error": task_res["error_message"]}
             combined_rows.extend(task_res.get("results", []))
 
         final_results = _apply_deduplication(combined_rows, DUPLICATE_CAP)[:limit]
@@ -381,4 +389,3 @@ async def search_batch(req: BatchRequest):
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
-
