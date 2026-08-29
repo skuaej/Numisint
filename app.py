@@ -1,10 +1,10 @@
-
 import os
 import duckdb
 import uvicorn
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from huggingface_hub import HfFileSystem
 
 # 1. Initialize FastAPI
 app = FastAPI(
@@ -13,35 +13,13 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# 2. Fetch Token from Environment Variable (Never Hardcoded)
+# 2. Authenticate Hugging Face FileSystem
 HF_TOKEN = os.getenv("HF_TOKEN", "")
+fs = HfFileSystem(token=HF_TOKEN if HF_TOKEN else None)
 
-# 3. Initialize DuckDB & Authenticate HTTPFS
+# 3. Initialize In-Memory DuckDB
 con = duckdb.connect()
-con.execute("INSTALL httpfs;")
-con.execute("LOAD httpfs;")
 
-# Inject Hugging Face Bearer Token securely if present
-if HF_TOKEN:
-    try:
-        con.execute(f"""
-            CREATE OR REPLACE SECRET hf_auth (
-                TYPE HTTP,
-                BEARER_TOKEN '{HF_TOKEN}',
-                EXTRA_HTTP_HEADERS MAP {{
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
-                }}
-            );
-        """)
-    except Exception:
-        con.execute(f"SET http_custom_headers=['Authorization: Bearer {HF_TOKEN}', 'User-Agent: Mozilla/5.0'];")
-else:
-    con.execute("SET custom_user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64)';")
-
-con.execute("SET enable_http_metadata_cache=true;")
-con.execute("SET http_keep_alive=true;")
-
-# 4. Landing Page UI
 LANDING_PAGE_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -84,7 +62,6 @@ LANDING_PAGE_HTML = """
 </html>
 """
 
-# 5. Route Handlers & Fallbacks
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
     if exc.status_code == 404:
@@ -119,30 +96,37 @@ def fetch_data(Number: str = Query(None)):
     
     last_digit = Number[-1]
     
-    primary_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet?download=true"
-    alt_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet?download=true"
+    # Bucket paths on Hugging Face
+    primary_path = f"CutehackX/hitek-data-bucket/final_master_shard_{last_digit}.parquet"
+    alt_path = f"CutehackX/hitek-data-bucket/alt_master_shard_{last_digit}.parquet"
     
     main_records = []
     alt_records = []
     errors = []
     
-    # Query Main Shard
+    # Query Main Shard via HfFileSystem
     try:
-        query_main = f"SELECT * FROM read_parquet('{primary_url}') WHERE mobile = '{Number}' OR CAST(mobile AS VARCHAR) = '{Number}'"
-        main_records = con.execute(query_main).df().to_dict(orient="records")
+        with fs.open(primary_path, "rb") as f:
+            df_main = con.execute(
+                f"SELECT * FROM read_parquet(f) WHERE CAST(mobile AS VARCHAR) = '{Number}'"
+            ).df()
+            main_records = df_main.to_dict(orient="records")
     except Exception as e:
         print(f"[ERROR] Main Shard Query Failed for {Number}: {e}")
         errors.append(f"Main shard: {str(e)}")
 
-    # Query Alt Shard
+    # Query Alt Shard via HfFileSystem
     try:
-        query_alt = f"SELECT * FROM read_parquet('{alt_url}') WHERE alt = '{Number}' OR CAST(alt AS VARCHAR) = '{Number}'"
-        alt_records = con.execute(query_alt).df().to_dict(orient="records")
+        with fs.open(alt_path, "rb") as f:
+            df_alt = con.execute(
+                f"SELECT * FROM read_parquet(f) WHERE CAST(alt AS VARCHAR) = '{Number}'"
+            ).df()
+            alt_records = df_alt.to_dict(orient="records")
     except Exception as e:
         print(f"[ERROR] Alt Shard Query Failed for {Number}: {e}")
         errors.append(f"Alt shard: {str(e)}")
 
-    # Clean non-serializable NaN/None values
+    # Sanitize NaN/None values for JSON serialization
     def sanitize(records):
         cleaned = []
         for row in records:
@@ -172,7 +156,6 @@ def fetch_data(Number: str = Query(None)):
         "Developer": "@Maybechx"
     }
 
-# 6. Port Binding
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
