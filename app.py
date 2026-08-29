@@ -11,10 +11,12 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# Initialize DuckDB and load HTTP Parquet support
+# Initialize DuckDB and configure HTTPFS for reliable remote reading
 con = duckdb.connect()
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
+con.execute("SET enable_http_metadata_cache=true;")
+con.execute("SET http_keep_alive=true;")
 
 LANDING_PAGE_HTML = """
 <!DOCTYPE html>
@@ -91,23 +93,48 @@ def fetch_data(Number: str = Query(None)):
         )
     
     last_digit = Number[-1]
-    primary_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet?download=true"
-    alt_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet?download=true"
+    
+    # Hugging Face resolve URLs
+    primary_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/main/final_master_shard_{last_digit}.parquet"
+    alt_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/main/alt_master_shard_{last_digit}.parquet"
     
     main_records = []
     alt_records = []
+    errors = []
     
+    # Query Main Shard (with string and integer fallback)
     try:
-        query_main = f"SELECT * FROM read_parquet('{primary_url}') WHERE mobile = '{Number}'"
+        query_main = f"""
+            SELECT * FROM read_parquet('{primary_url}') 
+            WHERE CAST(mobile AS VARCHAR) = '{Number}' 
+               OR mobile = '{Number}'
+        """
         main_records = con.execute(query_main).df().to_dict(orient="records")
-    except Exception:
-        pass
-    
+    except Exception as e:
+        print(f"[ERROR] Main Shard Query Failed for {Number}: {e}")
+        errors.append(f"Main shard: {str(e)}")
+
+    # Query Alt Shard (with string and integer fallback)
     try:
-        query_alt = f"SELECT * FROM read_parquet('{alt_url}') WHERE alt = '{Number}'"
+        query_alt = f"""
+            SELECT * FROM read_parquet('{alt_url}') 
+            WHERE CAST(alt AS VARCHAR) = '{Number}' 
+               OR alt = '{Number}'
+        """
         alt_records = con.execute(query_alt).df().to_dict(orient="records")
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[ERROR] Alt Shard Query Failed for {Number}: {e}")
+        errors.append(f"Alt shard: {str(e)}")
+
+    # Clean records of any non-serializable NaN/None types
+    def sanitize(records):
+        cleaned = []
+        for row in records:
+            cleaned.append({k: ("" if v is None or str(v).lower() == "nan" else str(v)) for k, v in row.items()})
+        return cleaned
+
+    main_records = sanitize(main_records)
+    alt_records = sanitize(alt_records)
 
     if not main_records and not alt_records:
         return JSONResponse(
@@ -115,7 +142,8 @@ def fetch_data(Number: str = Query(None)):
             content={
                 "status": "not_found",
                 "phone": Number,
-                "Developer": "@none"
+                "errors": errors if errors else None,
+                "Developer": "@Maybechx"
             }
         )
         
@@ -125,9 +153,10 @@ def fetch_data(Number: str = Query(None)):
             "Main_Records": main_records,
             "Alt_Records": alt_records
         },
-        "Developer": "@none"
+        "Developer": "@Maybechx"
     }
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
+
