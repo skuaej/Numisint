@@ -1,3 +1,4 @@
+
 import os
 import duckdb
 import uvicorn
@@ -5,19 +6,42 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+# 1. Initialize FastAPI
 app = FastAPI(
     title="Hitek Data Gateway",
     description="High-Speed Partitioned Parquet Lookup API",
     version="1.0.0"
 )
 
-# Initialize DuckDB and configure HTTPFS
+# 2. Fetch Token from Environment Variable (Never Hardcoded)
+HF_TOKEN = os.getenv("HF_TOKEN", "")
+
+# 3. Initialize DuckDB & Authenticate HTTPFS
 con = duckdb.connect()
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
+
+# Inject Hugging Face Bearer Token securely if present
+if HF_TOKEN:
+    try:
+        con.execute(f"""
+            CREATE OR REPLACE SECRET hf_auth (
+                TYPE HTTP,
+                BEARER_TOKEN '{HF_TOKEN}',
+                EXTRA_HTTP_HEADERS MAP {{
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'
+                }}
+            );
+        """)
+    except Exception:
+        con.execute(f"SET http_custom_headers=['Authorization: Bearer {HF_TOKEN}', 'User-Agent: Mozilla/5.0'];")
+else:
+    con.execute("SET custom_user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64)';")
+
 con.execute("SET enable_http_metadata_cache=true;")
 con.execute("SET http_keep_alive=true;")
 
+# 4. Landing Page UI
 LANDING_PAGE_HTML = """
 <!DOCTYPE html>
 <html lang="en">
@@ -60,6 +84,7 @@ LANDING_PAGE_HTML = """
 </html>
 """
 
+# 5. Route Handlers & Fallbacks
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
     if exc.status_code == 404:
@@ -94,7 +119,6 @@ def fetch_data(Number: str = Query(None)):
     
     last_digit = Number[-1]
     
-    # Direct Bucket Resolve URLs
     primary_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet?download=true"
     alt_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet?download=true"
     
@@ -118,7 +142,7 @@ def fetch_data(Number: str = Query(None)):
         print(f"[ERROR] Alt Shard Query Failed for {Number}: {e}")
         errors.append(f"Alt shard: {str(e)}")
 
-    # Sanitize NaN/None values for JSON compatibility
+    # Clean non-serializable NaN/None values
     def sanitize(records):
         cleaned = []
         for row in records:
@@ -148,6 +172,7 @@ def fetch_data(Number: str = Query(None)):
         "Developer": "@Maybechx"
     }
 
+# 6. Port Binding
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run("app:app", host="0.0.0.0", port=port)
