@@ -1,4 +1,3 @@
-
 import os
 import random
 from fastapi import FastAPI, Query, Request
@@ -9,7 +8,7 @@ import uvicorn
 
 app = FastAPI(title='Hitek Data Gateway')
 
-# Aapke 3 tested proxies ki list
+# Aapke tested proxies
 PROXIES = [
     "http://13.125.44.24:80",
     "http://3.10.170.234:3128",
@@ -49,23 +48,25 @@ def fetch_data(Number: str = Query(None)):
     success = False
     last_error = ""
     
-    # Proxies ko shuffle karein
     proxies_to_try = PROXIES.copy()
     random.shuffle(proxies_to_try)
 
     for proxy in proxies_to_try:
         try:
+            # [FIX]: DuckDB cURL use karta hai, isliye hum Proxy directly OS environment me set kar rahe hain
+            os.environ['HTTP_PROXY'] = proxy
+            os.environ['HTTPS_PROXY'] = proxy
+            
             con = duckdb.connect()
             con.execute('INSTALL httpfs;')
             con.execute('LOAD httpfs;')
             con.execute('SET enable_http_metadata_cache=true;')
             
-            # [FIXED]: Added "MAP" keyword before the headers dictionary
-            secret_query = f"""
-            CREATE OR REPLACE SECRET hf_proxy (
+            # Ab hum secret me sirf User-Agent bhejenge (jo perfectly kaam kar raha tha)
+            secret_query = """
+            CREATE OR REPLACE SECRET hf_headers (
                 TYPE HTTP,
-                PROXY '{proxy}',
-                EXTRA_HTTP_HEADERS MAP {{'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}}
+                EXTRA_HTTP_HEADERS MAP {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
             );
             """
             con.execute(secret_query)
@@ -86,7 +87,7 @@ def fetch_data(Number: str = Query(None)):
 
             success = True
             con.close()
-            break  # Data mil gaya, loop break karo
+            break 
 
         except Exception as e:
             last_error = str(e)
@@ -95,7 +96,7 @@ def fetch_data(Number: str = Query(None)):
                 con.close()
             except:
                 pass
-            continue  # Fail hone par next proxy try karo
+            continue 
 
     if not success:
         return JSONResponse(status_code=502, content={'status': 'error', 'message': 'All proxies failed or blocked.', 'details': last_error})
@@ -108,3 +109,4 @@ def fetch_data(Number: str = Query(None)):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
     uvicorn.run(app, host='0.0.0.0', port=port)
+
