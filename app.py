@@ -1,4 +1,5 @@
 import os
+import random
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -7,27 +8,12 @@ import uvicorn
 
 app = FastAPI(title='Hitek Data Gateway')
 
-# DuckDB Setup for Remote Streaming
-con = duckdb.connect()
-con.execute('INSTALL httpfs;')
-con.execute('LOAD httpfs;')
-con.execute('SET enable_http_metadata_cache=true;')
-
-# [NEW FIX]: Adding Proxy Support for HTTP Requests via Secrets
-# Yeh DuckDB ko Parquet file read karte time yeh proxy use karne ko kahega
-con.execute("""
-    CREATE SECRET my_http_proxy (
-        TYPE http, 
-        HTTP_PROXY 'http://15.235.21.254:8080'
-    );
-""")
-
-# Keeping the User-Agent header as well to avoid 403 blocks
-con.execute("""
-    SET HTTP_HEADERS = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    }
-""")
+# Aapke 3 tested proxies ki list
+PROXIES = [
+    "http://13.125.44.24:80",
+    "http://3.10.170.234:3128",
+    "http://15.235.21.254:8080"
+]
 
 LANDING_PAGE_HTML = """<!DOCTYPE html>
 <html>
@@ -54,26 +40,68 @@ def fetch_data(Number: str = Query(None)):
         return JSONResponse(status_code=400, content={'status': 'rejected', 'message': 'Invalid parameter.'})
     
     last_digit = Number[-1]
-    
     primary_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet'
     alt_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet'
     
     main_records = []
     alt_records = []
+    success = False
+    last_error = ""
     
-    try:
-        df_main = con.execute(f"SELECT * FROM read_parquet('{primary_url}') WHERE mobile = '{Number}' LIMIT 1").df()
-        if not df_main.empty:
-            main_records = df_main.fillna('').astype(str).to_dict(orient='records')
-    except Exception as e:
-        print(f'Main DB Error: {e}')
-    
-    try:
-        df_alt = con.execute(f"SELECT * FROM read_parquet('{alt_url}') WHERE alt = '{Number}' LIMIT 1").df()
-        if not df_alt.empty:
-            alt_records = df_alt.fillna('').astype(str).to_dict(orient='records')
-    except Exception as e:
-        print(f'Alt DB Error: {e}')
+    # Proxies ko shuffle karein taaki load balance ho aur rate-limit se bachein
+    proxies_to_try = PROXIES.copy()
+    random.shuffle(proxies_to_try)
+
+    # Retry loop: Agar ek proxy fail hui toh doosri try karega
+    for proxy in proxies_to_try:
+        try:
+            # Har proxy ke liye ek fresh isolated database connection
+            con = duckdb.connect()
+            con.execute('INSTALL httpfs;')
+            con.execute('LOAD httpfs;')
+            con.execute('SET enable_http_metadata_cache=true;')
+            
+            # [FIXED METHOD]: Naye DuckDB mein Headers/Proxy set karne ka sahi tarika (Secret)
+            secret_query = f"""
+            CREATE OR REPLACE SECRET hf_proxy (
+                TYPE HTTP,
+                PROXY '{proxy}',
+                EXTRA_HTTP_HEADERS {{'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}}
+            );
+            """
+            con.execute(secret_query)
+            
+            try:
+                df_main = con.execute(f"SELECT * FROM read_parquet('{primary_url}') WHERE mobile = '{Number}' LIMIT 1").df()
+                if not df_main.empty:
+                    main_records = df_main.fillna('').astype(str).to_dict(orient='records')
+            except Exception as e:
+                raise Exception(f"Main DB Error via {proxy}: {e}")
+            
+            try:
+                df_alt = con.execute(f"SELECT * FROM read_parquet('{alt_url}') WHERE alt = '{Number}' LIMIT 1").df()
+                if not df_alt.empty:
+                    alt_records = df_alt.fillna('').astype(str).to_dict(orient='records')
+            except Exception as e:
+                raise Exception(f"Alt DB Error via {proxy}: {e}")
+
+            # Agar koi exception nahi aayi (chahe record empty ho), toh request successful hai
+            success = True
+            con.close()
+            break  # Loop tod do kyunki data fetch ho gaya hai
+
+        except Exception as e:
+            # Agar proxy fail hui (timeout/403 block), toh us error ko record karke next proxy try karein
+            last_error = str(e)
+            print(f"Proxy Failed: {last_error}")
+            try:
+                con.close()
+            except:
+                pass
+            continue  # Next proxy par jao
+
+    if not success:
+        return JSONResponse(status_code=502, content={'status': 'error', 'message': 'All proxies failed or blocked.', 'details': last_error})
 
     if not main_records and not alt_records:
         return JSONResponse(status_code=404, content={'status': 'not_found', 'phone': Number})
