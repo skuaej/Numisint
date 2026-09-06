@@ -13,6 +13,13 @@ con.execute('INSTALL httpfs;')
 con.execute('LOAD httpfs;')
 con.execute('SET enable_http_metadata_cache=true;')
 
+# [FIX 403 ERROR]: Hugging Face bot-protection ko bypass karne ke liye User-Agent add kiya hai
+con.execute("""
+    SET HTTP_HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+    }
+""")
+
 LANDING_PAGE_HTML = """<!DOCTYPE html>
 <html>
 <head><title>Hitek Data Gateway</title></head>
@@ -38,6 +45,8 @@ def fetch_data(Number: str = Query(None)):
         return JSONResponse(status_code=400, content={'status': 'rejected', 'message': 'Invalid parameter.'})
     
     last_digit = Number[-1]
+    
+    # Restored your ORIGINAL working Bucket URLs
     primary_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet'
     alt_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet'
     
