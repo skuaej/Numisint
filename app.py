@@ -1,22 +1,25 @@
 import os
 import random
 import requests
+import urllib3
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import duckdb
 import uvicorn
 
+# SSL Warning ko hide karne ke liye
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
 app = FastAPI(title='Hitek Data Gateway')
 
-# Aapke tested proxies (Sirf URL nikalne ke liye use honge)
+# Aapke tested proxies
 PROXIES = [
     "http://13.125.44.24:80",
     "http://3.10.170.234:3128",
     "http://15.235.21.254:8080"
 ]
 
-# DuckDB normal mode me chalega, usko proxy ki zaroorat nahi hai
 con = duckdb.connect()
 con.execute('INSTALL httpfs;')
 con.execute('LOAD httpfs;')
@@ -27,8 +30,15 @@ def get_direct_aws_url(hf_url, proxy):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
     proxies = {'http': proxy, 'https': proxy}
     try:
-        # allow_redirects=False se hume AWS ka direct link 'Location' header me mil jayega
-        resp = requests.head(hf_url, headers=headers, proxies=proxies, allow_redirects=False, timeout=10)
+        # [FIX]: verify=False add kiya hai taaki proxy ke SSL errors bypass ho jayein
+        resp = requests.head(
+            hf_url, 
+            headers=headers, 
+            proxies=proxies, 
+            allow_redirects=False, 
+            timeout=10, 
+            verify=False
+        )
         if resp.status_code in (301, 302, 303, 307, 308):
             return resp.headers.get('Location')
         elif resp.status_code == 200:
@@ -65,7 +75,6 @@ def fetch_data(Number: str = Query(None)):
     primary_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet'
     alt_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet'
     
-    # Step 1: Ek working proxy se AWS ka fast direct link nikalo
     proxies_to_try = PROXIES.copy()
     random.shuffle(proxies_to_try)
     
@@ -79,14 +88,12 @@ def fetch_data(Number: str = Query(None)):
     if not primary_aws_url or not alt_aws_url:
         return JSONResponse(status_code=502, content={'status': 'error', 'message': 'Hugging Face URLs resolve nahi huye. Proxy Down ho sakti hai.'})
     
-    # SQL query tode na isliye escape single quotes in AWS URLs
     safe_primary_aws_url = primary_aws_url.replace("'", "''")
     safe_alt_aws_url = alt_aws_url.replace("'", "''")
     
     main_records = []
     alt_records = []
     
-    # Step 2: DuckDB seedha AWS URL par hit karega, No WAF/Cloudflare blocks here!
     try:
         df_main = con.execute(f"SELECT * FROM read_parquet('{safe_primary_aws_url}') WHERE mobile = '{Number}' LIMIT 1").df()
         if not df_main.empty:
@@ -109,4 +116,3 @@ def fetch_data(Number: str = Query(None)):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
     uvicorn.run(app, host='0.0.0.0', port=port)
-
