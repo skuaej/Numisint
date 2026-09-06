@@ -13,7 +13,16 @@ con.execute('INSTALL httpfs;')
 con.execute('LOAD httpfs;')
 con.execute('SET enable_http_metadata_cache=true;')
 
-# [FIX 403 ERROR]: Hugging Face bot-protection ko bypass karne ke liye User-Agent add kiya hai
+# [NEW FIX]: Adding Proxy Support for HTTP Requests via Secrets
+# Yeh DuckDB ko Parquet file read karte time yeh proxy use karne ko kahega
+con.execute("""
+    CREATE SECRET my_http_proxy (
+        TYPE http, 
+        HTTP_PROXY 'http://15.235.21.254:8080'
+    );
+""")
+
+# Keeping the User-Agent header as well to avoid 403 blocks
 con.execute("""
     SET HTTP_HEADERS = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
@@ -46,7 +55,6 @@ def fetch_data(Number: str = Query(None)):
     
     last_digit = Number[-1]
     
-    # Restored your ORIGINAL working Bucket URLs
     primary_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet'
     alt_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet'
     
