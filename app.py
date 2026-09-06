@@ -1,10 +1,10 @@
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-from huggingface_hub import hf_hub_download
 import pandas as pd
-import os
+import requests
 import tempfile
+import os
 import uvicorn
 
 app = FastAPI(title="Hitek Data Gateway")
@@ -14,7 +14,7 @@ LANDING_PAGE_HTML = """<!DOCTYPE html>
 <head><title>Hitek Data Gateway</title></head>
 <body style="background:#050505;color:#00ffcc;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;">
   <div style="text-align:center;border:1px solid #00ffcc;padding:30px;border-radius:8px;">
-    <h2>SYSTEM ONLINE (HF HUB)</h2>
+    <h2>SYSTEM ONLINE (DIRECT)</h2>
     <p>Use: <code>/FetchData?Number=XXXXXXXXXX</code></p>
   </div>
 </body>
@@ -31,15 +31,21 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
 def root():
     return HTMLResponse(content=LANDING_PAGE_HTML, status_code=200)
 
-def load_parquet_from_hf(filename: str) -> pd.DataFrame:
-    """Download a single parquet file from the public bucket and return as DataFrame."""
-    local_path = hf_hub_download(
-        repo_id="CutehackX/hitek-data-bucket",
-        filename=filename,
-        repo_type="bucket",          # important for Storage Buckets
-        token=None,                  # public – no token needed
-    )
-    return pd.read_parquet(local_path)
+def load_parquet(url: str) -> pd.DataFrame:
+    """Download parquet file and return as DataFrame."""
+    response = requests.get(url, timeout=60)
+    response.raise_for_status()
+
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=False) as tmp:
+        tmp.write(response.content)
+        tmp_path = tmp.name
+
+    try:
+        df = pd.read_parquet(tmp_path)
+    finally:
+        os.unlink(tmp_path)
+
+    return df
 
 @app.get("/FetchData")
 def fetch_data(Number: str = Query(None)):
@@ -50,15 +56,15 @@ def fetch_data(Number: str = Query(None)):
         )
 
     last_digit = Number[-1]
-    main_file = f"final_master_shard_{last_digit}.parquet"
-    alt_file  = f"alt_master_shard_{last_digit}.parquet"
+    primary_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet"
+    alt_url     = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet"
 
     main_records = []
     alt_records  = []
 
     # Main records
     try:
-        df_main = load_parquet_from_hf(main_file)
+        df_main = load_parquet(primary_url)
         matched = df_main[df_main["mobile"].astype(str) == Number]
         if not matched.empty:
             main_records = matched.fillna("").astype(str).to_dict(orient="records")
@@ -67,7 +73,7 @@ def fetch_data(Number: str = Query(None)):
 
     # Alt records
     try:
-        df_alt = load_parquet_from_hf(alt_file)
+        df_alt = load_parquet(alt_url)
         matched = df_alt[df_alt["alt"].astype(str) == Number]
         if not matched.empty:
             alt_records = matched.fillna("").astype(str).to_dict(orient="records")
