@@ -1,3 +1,4 @@
+
 import os
 import random
 from fastapi import FastAPI, Query, Request
@@ -48,25 +49,23 @@ def fetch_data(Number: str = Query(None)):
     success = False
     last_error = ""
     
-    # Proxies ko shuffle karein taaki load balance ho aur rate-limit se bachein
+    # Proxies ko shuffle karein
     proxies_to_try = PROXIES.copy()
     random.shuffle(proxies_to_try)
 
-    # Retry loop: Agar ek proxy fail hui toh doosri try karega
     for proxy in proxies_to_try:
         try:
-            # Har proxy ke liye ek fresh isolated database connection
             con = duckdb.connect()
             con.execute('INSTALL httpfs;')
             con.execute('LOAD httpfs;')
             con.execute('SET enable_http_metadata_cache=true;')
             
-            # [FIXED METHOD]: Naye DuckDB mein Headers/Proxy set karne ka sahi tarika (Secret)
+            # [FIXED]: Added "MAP" keyword before the headers dictionary
             secret_query = f"""
             CREATE OR REPLACE SECRET hf_proxy (
                 TYPE HTTP,
                 PROXY '{proxy}',
-                EXTRA_HTTP_HEADERS {{'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}}
+                EXTRA_HTTP_HEADERS MAP {{'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}}
             );
             """
             con.execute(secret_query)
@@ -85,20 +84,18 @@ def fetch_data(Number: str = Query(None)):
             except Exception as e:
                 raise Exception(f"Alt DB Error via {proxy}: {e}")
 
-            # Agar koi exception nahi aayi (chahe record empty ho), toh request successful hai
             success = True
             con.close()
-            break  # Loop tod do kyunki data fetch ho gaya hai
+            break  # Data mil gaya, loop break karo
 
         except Exception as e:
-            # Agar proxy fail hui (timeout/403 block), toh us error ko record karke next proxy try karein
             last_error = str(e)
             print(f"Proxy Failed: {last_error}")
             try:
                 con.close()
             except:
                 pass
-            continue  # Next proxy par jao
+            continue  # Fail hone par next proxy try karo
 
     if not success:
         return JSONResponse(status_code=502, content={'status': 'error', 'message': 'All proxies failed or blocked.', 'details': last_error})
