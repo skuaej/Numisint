@@ -1,5 +1,6 @@
 import os
 import random
+import requests
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -8,12 +9,33 @@ import uvicorn
 
 app = FastAPI(title='Hitek Data Gateway')
 
-# Aapke tested proxies
+# Aapke tested proxies (Sirf URL nikalne ke liye use honge)
 PROXIES = [
     "http://13.125.44.24:80",
     "http://3.10.170.234:3128",
     "http://15.235.21.254:8080"
 ]
+
+# DuckDB normal mode me chalega, usko proxy ki zaroorat nahi hai
+con = duckdb.connect()
+con.execute('INSTALL httpfs;')
+con.execute('LOAD httpfs;')
+con.execute('SET enable_http_metadata_cache=true;')
+
+def get_direct_aws_url(hf_url, proxy):
+    """Proxy ka use karke sirf Hugging Face ka redirect (AWS S3 URL) nikalo"""
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
+    proxies = {'http': proxy, 'https': proxy}
+    try:
+        # allow_redirects=False se hume AWS ka direct link 'Location' header me mil jayega
+        resp = requests.head(hf_url, headers=headers, proxies=proxies, allow_redirects=False, timeout=10)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            return resp.headers.get('Location')
+        elif resp.status_code == 200:
+            return hf_url
+    except Exception as e:
+        print(f"Proxy {proxy} failed: {e}")
+    return None
 
 LANDING_PAGE_HTML = """<!DOCTYPE html>
 <html>
@@ -43,63 +65,41 @@ def fetch_data(Number: str = Query(None)):
     primary_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet'
     alt_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet'
     
-    main_records = []
-    alt_records = []
-    success = False
-    last_error = ""
-    
+    # Step 1: Ek working proxy se AWS ka fast direct link nikalo
     proxies_to_try = PROXIES.copy()
     random.shuffle(proxies_to_try)
-
+    
+    primary_aws_url, alt_aws_url = None, None
     for proxy in proxies_to_try:
-        try:
-            # [FIX]: DuckDB cURL use karta hai, isliye hum Proxy directly OS environment me set kar rahe hain
-            os.environ['HTTP_PROXY'] = proxy
-            os.environ['HTTPS_PROXY'] = proxy
+        primary_aws_url = get_direct_aws_url(primary_url, proxy)
+        alt_aws_url = get_direct_aws_url(alt_url, proxy)
+        if primary_aws_url and alt_aws_url:
+            break
             
-            con = duckdb.connect()
-            con.execute('INSTALL httpfs;')
-            con.execute('LOAD httpfs;')
-            con.execute('SET enable_http_metadata_cache=true;')
-            
-            # Ab hum secret me sirf User-Agent bhejenge (jo perfectly kaam kar raha tha)
-            secret_query = """
-            CREATE OR REPLACE SECRET hf_headers (
-                TYPE HTTP,
-                EXTRA_HTTP_HEADERS MAP {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'}
-            );
-            """
-            con.execute(secret_query)
-            
-            try:
-                df_main = con.execute(f"SELECT * FROM read_parquet('{primary_url}') WHERE mobile = '{Number}' LIMIT 1").df()
-                if not df_main.empty:
-                    main_records = df_main.fillna('').astype(str).to_dict(orient='records')
-            except Exception as e:
-                raise Exception(f"Main DB Error via {proxy}: {e}")
-            
-            try:
-                df_alt = con.execute(f"SELECT * FROM read_parquet('{alt_url}') WHERE alt = '{Number}' LIMIT 1").df()
-                if not df_alt.empty:
-                    alt_records = df_alt.fillna('').astype(str).to_dict(orient='records')
-            except Exception as e:
-                raise Exception(f"Alt DB Error via {proxy}: {e}")
-
-            success = True
-            con.close()
-            break 
-
-        except Exception as e:
-            last_error = str(e)
-            print(f"Proxy Failed: {last_error}")
-            try:
-                con.close()
-            except:
-                pass
-            continue 
-
-    if not success:
-        return JSONResponse(status_code=502, content={'status': 'error', 'message': 'All proxies failed or blocked.', 'details': last_error})
+    if not primary_aws_url or not alt_aws_url:
+        return JSONResponse(status_code=502, content={'status': 'error', 'message': 'Hugging Face URLs resolve nahi huye. Proxy Down ho sakti hai.'})
+    
+    # SQL query tode na isliye escape single quotes in AWS URLs
+    safe_primary_aws_url = primary_aws_url.replace("'", "''")
+    safe_alt_aws_url = alt_aws_url.replace("'", "''")
+    
+    main_records = []
+    alt_records = []
+    
+    # Step 2: DuckDB seedha AWS URL par hit karega, No WAF/Cloudflare blocks here!
+    try:
+        df_main = con.execute(f"SELECT * FROM read_parquet('{safe_primary_aws_url}') WHERE mobile = '{Number}' LIMIT 1").df()
+        if not df_main.empty:
+            main_records = df_main.fillna('').astype(str).to_dict(orient='records')
+    except Exception as e:
+        print(f'Main DB Error: {e}')
+    
+    try:
+        df_alt = con.execute(f"SELECT * FROM read_parquet('{safe_alt_aws_url}') WHERE alt = '{Number}' LIMIT 1").df()
+        if not df_alt.empty:
+            alt_records = df_alt.fillna('').astype(str).to_dict(orient='records')
+    except Exception as e:
+        print(f'Alt DB Error: {e}')
 
     if not main_records and not alt_records:
         return JSONResponse(status_code=404, content={'status': 'not_found', 'phone': Number})
