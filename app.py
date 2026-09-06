@@ -2,15 +2,25 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import duckdb
+import os
 import uvicorn
 
 app = FastAPI(title="Hitek Data Gateway")
 
-# DuckDB with remote HTTP streaming
+# ---------- DuckDB + Hugging Face Auth ----------
 con = duckdb.connect()
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 con.execute("SET enable_http_metadata_cache=true;")
+
+HF_TOKEN = os.getenv("HF_TOKEN")
+if HF_TOKEN:
+    # This is the correct way for private HF buckets / files
+    con.execute(f"SET http_header_Authorization='Bearer {HF_TOKEN}';")
+else:
+    print("WARNING: HF_TOKEN environment variable is missing!")
+
+# ------------------------------------------------
 
 LANDING_PAGE_HTML = """<!DOCTYPE html>
 <html>
@@ -44,10 +54,10 @@ def fetch_data(Number: str = Query(None)):
 
     last_digit = Number[-1]
     primary_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet"
-    alt_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet"
+    alt_url     = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet"
 
     main_records = []
-    alt_records = []
+    alt_records  = []
 
     try:
         df_main = con.execute(
