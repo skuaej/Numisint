@@ -1,25 +1,20 @@
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
-import duckdb
+from huggingface_hub import hf_hub_download
+import pandas as pd
+import os
+import tempfile
 import uvicorn
 
 app = FastAPI(title="Hitek Data Gateway")
-
-# ---------- DuckDB (public bucket - no auth) ----------
-con = duckdb.connect()
-con.execute("INSTALL httpfs;")
-con.execute("LOAD httpfs;")
-con.execute("SET enable_http_metadata_cache=true;")
-print("DuckDB ready (public mode)")
-# -----------------------------------------------------
 
 LANDING_PAGE_HTML = """<!DOCTYPE html>
 <html>
 <head><title>Hitek Data Gateway</title></head>
 <body style="background:#050505;color:#00ffcc;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;">
   <div style="text-align:center;border:1px solid #00ffcc;padding:30px;border-radius:8px;">
-    <h2>SYSTEM ONLINE (PUBLIC)</h2>
+    <h2>SYSTEM ONLINE (HF HUB)</h2>
     <p>Use: <code>/FetchData?Number=XXXXXXXXXX</code></p>
   </div>
 </body>
@@ -36,6 +31,16 @@ async def custom_http_exception_handler(request: Request, exc: StarletteHTTPExce
 def root():
     return HTMLResponse(content=LANDING_PAGE_HTML, status_code=200)
 
+def load_parquet_from_hf(filename: str) -> pd.DataFrame:
+    """Download a single parquet file from the public bucket and return as DataFrame."""
+    local_path = hf_hub_download(
+        repo_id="CutehackX/hitek-data-bucket",
+        filename=filename,
+        repo_type="bucket",          # important for Storage Buckets
+        token=None,                  # public – no token needed
+    )
+    return pd.read_parquet(local_path)
+
 @app.get("/FetchData")
 def fetch_data(Number: str = Query(None)):
     if not Number or not Number.isdigit() or not (10 <= len(Number) <= 15):
@@ -45,27 +50,27 @@ def fetch_data(Number: str = Query(None)):
         )
 
     last_digit = Number[-1]
-    primary_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet"
-    alt_url     = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet"
+    main_file = f"final_master_shard_{last_digit}.parquet"
+    alt_file  = f"alt_master_shard_{last_digit}.parquet"
 
     main_records = []
     alt_records  = []
 
+    # Main records
     try:
-        df_main = con.execute(
-            f"SELECT * FROM read_parquet('{primary_url}') WHERE mobile = '{Number}' LIMIT 1"
-        ).df()
-        if not df_main.empty:
-            main_records = df_main.fillna("").astype(str).to_dict(orient="records")
+        df_main = load_parquet_from_hf(main_file)
+        matched = df_main[df_main["mobile"].astype(str) == Number]
+        if not matched.empty:
+            main_records = matched.fillna("").astype(str).to_dict(orient="records")
     except Exception as e:
         print(f"Main DB Error: {e}")
 
+    # Alt records
     try:
-        df_alt = con.execute(
-            f"SELECT * FROM read_parquet('{alt_url}') WHERE alt = '{Number}' LIMIT 1"
-        ).df()
-        if not df_alt.empty:
-            alt_records = df_alt.fillna("").astype(str).to_dict(orient="records")
+        df_alt = load_parquet_from_hf(alt_file)
+        matched = df_alt[df_alt["alt"].astype(str) == Number]
+        if not matched.empty:
+            alt_records = matched.fillna("").astype(str).to_dict(orient="records")
     except Exception as e:
         print(f"Alt DB Error: {e}")
 
