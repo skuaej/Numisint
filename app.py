@@ -7,7 +7,7 @@ import uvicorn
 
 app = FastAPI(title="Hitek Data Gateway")
 
-# ---------- DuckDB Setup (correct authentication) ----------
+# ---------- DuckDB + Forced Auth Header ----------
 con = duckdb.connect()
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
@@ -16,17 +16,20 @@ con.execute("SET enable_http_metadata_cache=true;")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 if HF_TOKEN:
-    # This works with normal https:// URLs
+    # Force the Authorization header for all huggingface.co requests
     con.execute(f"""
-        CREATE OR REPLACE SECRET http_auth (
+        CREATE OR REPLACE SECRET hf_http (
             TYPE http,
-            BEARER_TOKEN '{HF_TOKEN}'
+            SCOPE 'https://huggingface.co',
+            EXTRA_HTTP_HEADERS MAP {{
+                'Authorization': 'Bearer {HF_TOKEN}'
+            }}
         );
     """)
-    print("HTTP Bearer token secret created successfully")
+    print("Forced HTTP Authorization header secret created")
 else:
-    print("WARNING: HF_TOKEN is missing!")
-# -----------------------------------------------------------
+    print("WARNING: HF_TOKEN environment variable is missing!")
+# ------------------------------------------------
 
 LANDING_PAGE_HTML = """<!DOCTYPE html>
 <html>
