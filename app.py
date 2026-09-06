@@ -1,57 +1,18 @@
 import os
 import random
-import requests
-import urllib3
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import duckdb
 import uvicorn
 
-# SSL warnings ko hide karega
-urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
 app = FastAPI(title='Hitek Data Gateway')
 
-# Aapke naye, fast aur verified proxies
+# Aapke tested aur working fast proxies
 PROXIES = [
     "http://13.125.44.24:80",
     "http://3.10.170.234:3128"
 ]
-
-con = duckdb.connect()
-con.execute('INSTALL httpfs;')
-con.execute('LOAD httpfs;')
-con.execute('SET enable_http_metadata_cache=true;')
-
-def get_direct_aws_url(hf_url, proxy=None):
-    """Hugging Face WAF ko bypass karke direct S3/AWS link nikalega"""
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': '*/*'
-    }
-    proxies = {'http': proxy, 'https': proxy} if proxy else None
-    
-    try:
-        resp = requests.get(
-            hf_url, 
-            headers=headers, 
-            proxies=proxies, 
-            allow_redirects=True, 
-            timeout=8, 
-            verify=False,
-            stream=True
-        )
-        final_url = str(resp.url)
-        resp.close()
-        
-        # Check if URL changed to AWS/CDN
-        if final_url != hf_url and ("aws" in final_url or "cdn" in final_url or "xet" in final_url):
-            return final_url
-            
-    except Exception as e:
-        print(f"[{proxy or 'DIRECT'}] Error: {type(e).__name__}")
-    return None
 
 LANDING_PAGE_HTML = """<!DOCTYPE html>
 <html>
@@ -78,52 +39,75 @@ def fetch_data(Number: str = Query(None)):
         return JSONResponse(status_code=400, content={'status': 'rejected', 'message': 'Invalid parameter.'})
     
     last_digit = Number[-1]
+    
+    # Original Sahi URLs (Hugging Face ke buckets wale)
     primary_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet'
     alt_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet'
     
-    primary_aws_url, alt_aws_url = None, None
-    
-    # 1. Sabse pehle DIRECT try karega (Best Case)
-    primary_aws_url = get_direct_aws_url(primary_url, proxy=None)
-    alt_aws_url = get_direct_aws_url(alt_url, proxy=None)
-    
-    # 2. Agar fail hua, toh sirf aapke FAST PROXIES try karega
-    if not primary_aws_url or not alt_aws_url:
-        proxies_to_try = PROXIES.copy()
-        random.shuffle(proxies_to_try)
-        
-        for proxy in proxies_to_try:
-            if not primary_aws_url:
-                primary_aws_url = get_direct_aws_url(primary_url, proxy)
-            if not alt_aws_url:
-                alt_aws_url = get_direct_aws_url(alt_url, proxy)
-                
-            if primary_aws_url and alt_aws_url:
-                break
-
-    if not primary_aws_url or not alt_aws_url:
-        return JSONResponse(status_code=502, content={'status': 'error', 'message': 'Unable to resolve Hugging Face AWS Links.'})
-    
-    # Secure URLs for DuckDB
-    safe_primary_aws_url = primary_aws_url.replace("'", "''")
-    safe_alt_aws_url = alt_aws_url.replace("'", "''")
-    
     main_records = []
     alt_records = []
+    success = False
+    last_error = ""
     
-    try:
-        df_main = con.execute(f"SELECT * FROM read_parquet('{safe_primary_aws_url}') WHERE mobile = '{Number}' LIMIT 1").df()
-        if not df_main.empty:
-            main_records = df_main.fillna('').astype(str).to_dict(orient='records')
-    except Exception as e:
-        print(f'Main DB Error: {e}')
-    
-    try:
-        df_alt = con.execute(f"SELECT * FROM read_parquet('{safe_alt_aws_url}') WHERE alt = '{Number}' LIMIT 1").df()
-        if not df_alt.empty:
-            alt_records = df_alt.fillna('').astype(str).to_dict(orient='records')
-    except Exception as e:
-        print(f'Alt DB Error: {e}')
+    proxies_to_try = PROXIES.copy()
+    random.shuffle(proxies_to_try)
+
+    for proxy in proxies_to_try:
+        try:
+            # DuckDB (cURL backend) ke liye OS level proxies set karna (Yeh sabse stable tareeqa hai)
+            os.environ['HTTP_PROXY'] = proxy
+            os.environ['HTTPS_PROXY'] = proxy
+            os.environ['ALL_PROXY'] = proxy
+            
+            # Har proxy try ke liye naya connection taaki pichla proxy cache na ho
+            con = duckdb.connect()
+            con.execute('INSTALL httpfs;')
+            con.execute('LOAD httpfs;')
+            con.execute('SET enable_http_metadata_cache=true;')
+            
+            # Headers set karna zaroori hai Hugging Face WAF ke liye
+            con.execute("""
+                CREATE OR REPLACE SECRET hf_headers (
+                    TYPE HTTP,
+                    EXTRA_HTTP_HEADERS MAP {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
+                );
+            """)
+            
+            try:
+                df_main = con.execute(f"SELECT * FROM read_parquet('{primary_url}') WHERE mobile = '{Number}' LIMIT 1").df()
+                if not df_main.empty:
+                    main_records = df_main.fillna('').astype(str).to_dict(orient='records')
+            except Exception as e:
+                raise Exception(f"Main DB Error via {proxy}: {e}")
+            
+            try:
+                df_alt = con.execute(f"SELECT * FROM read_parquet('{alt_url}') WHERE alt = '{Number}' LIMIT 1").df()
+                if not df_alt.empty:
+                    alt_records = df_alt.fillna('').astype(str).to_dict(orient='records')
+            except Exception as e:
+                raise Exception(f"Alt DB Error via {proxy}: {e}")
+
+            # Agar dono requests pass ho gayi (chahe data khali kyu na ho)
+            success = True
+            con.close()
+            break # Loop khatam, proxy kaam kar gayi
+
+        except Exception as e:
+            last_error = str(e)
+            print(f"Proxy Failed: {last_error}")
+            try:
+                con.close()
+            except:
+                pass
+            
+            # Environment variables clear karo agle try ke liye
+            if 'HTTP_PROXY' in os.environ: del os.environ['HTTP_PROXY']
+            if 'HTTPS_PROXY' in os.environ: del os.environ['HTTPS_PROXY']
+            if 'ALL_PROXY' in os.environ: del os.environ['ALL_PROXY']
+            continue 
+
+    if not success:
+        return JSONResponse(status_code=502, content={'status': 'error', 'message': 'All proxies failed or blocked.', 'details': last_error})
 
     if not main_records and not alt_records:
         return JSONResponse(status_code=404, content={'status': 'not_found', 'phone': Number})
