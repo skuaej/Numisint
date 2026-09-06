@@ -7,7 +7,7 @@ import uvicorn
 
 app = FastAPI(title="Hitek Data Gateway")
 
-# ---------- DuckDB + Hugging Face Auth (correct method) ----------
+# ---------- DuckDB Setup (correct authentication) ----------
 con = duckdb.connect()
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
@@ -16,17 +16,17 @@ con.execute("SET enable_http_metadata_cache=true;")
 HF_TOKEN = os.getenv("HF_TOKEN")
 
 if HF_TOKEN:
-    # Create a secret that will be used for all huggingface.co requests
+    # This works with normal https:// URLs
     con.execute(f"""
-        CREATE OR REPLACE SECRET hf_secret (
-            TYPE huggingface,
-            TOKEN '{HF_TOKEN}'
+        CREATE OR REPLACE SECRET http_auth (
+            TYPE http,
+            BEARER_TOKEN '{HF_TOKEN}'
         );
     """)
-    print("Hugging Face secret created successfully")
+    print("HTTP Bearer token secret created successfully")
 else:
-    print("WARNING: HF_TOKEN environment variable is missing!")
-# -----------------------------------------------------------------
+    print("WARNING: HF_TOKEN is missing!")
+# -----------------------------------------------------------
 
 LANDING_PAGE_HTML = """<!DOCTYPE html>
 <html>
