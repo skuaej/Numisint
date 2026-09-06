@@ -8,7 +8,7 @@ import os
 
 app = FastAPI(title='Hitek Data Gateway')
 
-# DuckDB Setup
+# DuckDB Setup for Remote Streaming
 con = duckdb.connect()
 con.execute('INSTALL httpfs;')
 con.execute('LOAD httpfs;')
@@ -39,8 +39,9 @@ def fetch_data(Number: str = Query(None)):
         return JSONResponse(status_code=400, content={'status': 'rejected', 'message': 'Invalid parameter.'})
     
     last_digit = Number[-1]
-    primary_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/main/final_master_shard_{last_digit}.parquet'
-    alt_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/main/alt_master_shard_{last_digit}.parquet'
+    # Fixed URL for Hugging Face Buckets (removed /resolve/main/)
+    primary_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/final_master_shard_{last_digit}.parquet'
+    alt_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/alt_master_shard_{last_digit}.parquet'
     
     main_records = []
     alt_records = []
@@ -67,4 +68,3 @@ def fetch_data(Number: str = Query(None)):
 if __name__ == '__main__':
     port = int(os.environ.get("PORT", 8000))
     uvicorn.run(app, host='0.0.0.0', port=port)
-
