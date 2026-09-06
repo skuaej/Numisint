@@ -1,4 +1,4 @@
-From fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import duckdb
