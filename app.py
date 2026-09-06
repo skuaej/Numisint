@@ -30,21 +30,28 @@ def get_direct_aws_url(hf_url, proxy):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
     proxies = {'http': proxy, 'https': proxy}
     try:
-        # [FIX]: verify=False add kiya hai taaki proxy ke SSL errors bypass ho jayein
-        resp = requests.head(
+        # [FIX]: HEAD ki jagah GET (stream=True) use kiya hai taaki HF redirect link lazmi de
+        resp = requests.get(
             hf_url, 
             headers=headers, 
             proxies=proxies, 
             allow_redirects=False, 
             timeout=10, 
-            verify=False
+            verify=False,
+            stream=True
         )
+        resp.close() # Connection band karo taaki memory bache
+        
+        # Agar redirect milta hai (S3 Link)
         if resp.status_code in (301, 302, 303, 307, 308):
-            return resp.headers.get('Location')
-        elif resp.status_code == 200:
-            return hf_url
+            aws_link = resp.headers.get('Location')
+            if "aws" in aws_link or "cdn" in aws_link:
+                return aws_link
+        else:
+            print(f"Proxy {proxy} failed to get redirect. Status: {resp.status_code}")
+            
     except Exception as e:
-        print(f"Proxy {proxy} failed: {e}")
+        print(f"Proxy {proxy} error: {e}")
     return None
 
 LANDING_PAGE_HTML = """<!DOCTYPE html>
@@ -78,16 +85,24 @@ def fetch_data(Number: str = Query(None)):
     proxies_to_try = PROXIES.copy()
     random.shuffle(proxies_to_try)
     
-    primary_aws_url, alt_aws_url = None, None
+    primary_aws_url = None
+    alt_aws_url = None
+    
+    # Dono URLs ke liye alag alag proxy bhi use ho sakti hai agar ek fail ho
     for proxy in proxies_to_try:
-        primary_aws_url = get_direct_aws_url(primary_url, proxy)
-        alt_aws_url = get_direct_aws_url(alt_url, proxy)
+        if not primary_aws_url:
+            primary_aws_url = get_direct_aws_url(primary_url, proxy)
+        if not alt_aws_url:
+            alt_aws_url = get_direct_aws_url(alt_url, proxy)
+            
         if primary_aws_url and alt_aws_url:
             break
             
+    # Agar AWS URL extract nahi ho paya, toh code yahin ruk jayega (DuckDB 403 block nahi khayega)
     if not primary_aws_url or not alt_aws_url:
-        return JSONResponse(status_code=502, content={'status': 'error', 'message': 'Hugging Face URLs resolve nahi huye. Proxy Down ho sakti hai.'})
+        return JSONResponse(status_code=502, content={'status': 'error', 'message': 'Failed to resolve AWS S3 Links via proxies. Please retry.'})
     
+    # SQL query tode na isliye single quotes escape karein
     safe_primary_aws_url = primary_aws_url.replace("'", "''")
     safe_alt_aws_url = alt_aws_url.replace("'", "''")
     
