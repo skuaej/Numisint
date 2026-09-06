@@ -3,68 +3,83 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 import duckdb
 import uvicorn
-import pandas as pd
-import os
 
-app = FastAPI(title='Hitek Data Gateway')
+app = FastAPI(title="Hitek Data Gateway")
 
-# DuckDB Setup for Remote Streaming
+# DuckDB with remote HTTP streaming
 con = duckdb.connect()
-con.execute('INSTALL httpfs;')
-con.execute('LOAD httpfs;')
-con.execute('SET enable_http_metadata_cache=true;')
+con.execute("INSTALL httpfs;")
+con.execute("LOAD httpfs;")
+con.execute("SET enable_http_metadata_cache=true;")
 
-LANDING_PAGE_HTML = '''<!DOCTYPE html>
+LANDING_PAGE_HTML = """<!DOCTYPE html>
 <html>
 <head><title>Hitek Data Gateway</title></head>
 <body style="background:#050505;color:#00ffcc;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;">
   <div style="text-align:center;border:1px solid #00ffcc;padding:30px;border-radius:8px;">
-    <h2>SYSTEM ONLINE (PRO MODE)</h2>
+    <h2>SYSTEM ONLINE (KOYEB)</h2>
     <p>Use: <code>/FetchData?Number=XXXXXXXXXX</code></p>
   </div>
 </body>
-</html>'''
+</html>"""
 
 @app.exception_handler(StarletteHTTPException)
 async def custom_http_exception_handler(request: Request, exc: StarletteHTTPException):
-    return JSONResponse(status_code=exc.status_code, content={'status': 'rejected', 'message': 'Invalid endpoint.'})
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={"status": "rejected", "message": "Invalid endpoint."},
+    )
 
-@app.get('/', response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse)
 def root():
     return HTMLResponse(content=LANDING_PAGE_HTML, status_code=200)
 
-@app.get('/FetchData')
+@app.get("/FetchData")
 def fetch_data(Number: str = Query(None)):
-    if not Number or not Number.isdigit() or len(Number) < 10 or len(Number) > 15:
-        return JSONResponse(status_code=400, content={'status': 'rejected', 'message': 'Invalid parameter.'})
-    
+    if not Number or not Number.isdigit() or not (10 <= len(Number) <= 15):
+        return JSONResponse(
+            status_code=400,
+            content={"status": "rejected", "message": "Invalid parameter."},
+        )
+
     last_digit = Number[-1]
-    # Fixed URL for Hugging Face Buckets (removed /resolve/main/)
-    primary_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/final_master_shard_{last_digit}.parquet'
-    alt_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/alt_master_shard_{last_digit}.parquet'
-    
+    primary_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet"
+    alt_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet"
+
     main_records = []
     alt_records = []
-    
+
     try:
-        df_main = con.execute(f"SELECT * FROM read_parquet('{primary_url}') WHERE mobile = '{Number}' LIMIT 1").df()
+        df_main = con.execute(
+            f"SELECT * FROM read_parquet('{primary_url}') WHERE mobile = '{Number}' LIMIT 1"
+        ).df()
         if not df_main.empty:
-            main_records = df_main.fillna('').astype(str).to_dict(orient='records')
+            main_records = df_main.fillna("").astype(str).to_dict(orient="records")
     except Exception as e:
-        print(f'Main DB Error: {e}')
-    
+        print(f"Main DB Error: {e}")
+
     try:
-        df_alt = con.execute(f"SELECT * FROM read_parquet('{alt_url}') WHERE alt = '{Number}' LIMIT 1").df()
+        df_alt = con.execute(
+            f"SELECT * FROM read_parquet('{alt_url}') WHERE alt = '{Number}' LIMIT 1"
+        ).df()
         if not df_alt.empty:
-            alt_records = df_alt.fillna('').astype(str).to_dict(orient='records')
+            alt_records = df_alt.fillna("").astype(str).to_dict(orient="records")
     except Exception as e:
-        print(f'Alt DB Error: {e}')
+        print(f"Alt DB Error: {e}")
 
     if not main_records and not alt_records:
-        return JSONResponse(status_code=404, content={'status': 'not_found', 'phone': Number})
-        
-    return {'status': 'success', 'Data': {'Main_Records': main_records, 'Alt_Records': alt_records}}
+        return JSONResponse(
+            status_code=404,
+            content={"status": "not_found", "phone": Number},
+        )
 
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 8000))
-    uvicorn.run(app, host='0.0.0.0', port=port)
+    return {
+        "status": "success",
+        "Data": {
+            "Main_Records": main_records,
+            "Alt_Records": alt_records,
+        },
+    }
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8000)
