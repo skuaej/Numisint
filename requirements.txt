@@ -9,3 +9,5 @@ pydantic==2.9.2
 
 
 huggingface_hub
+
+starlette
