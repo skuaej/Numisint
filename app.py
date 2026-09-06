@@ -7,36 +7,37 @@ import uvicorn
 
 app = FastAPI(title="Hitek Data Gateway")
 
-# ---------- DuckDB + Forced Auth Header ----------
+# ---------- DuckDB + Hugging Face S3 ----------
 con = duckdb.connect()
 con.execute("INSTALL httpfs;")
 con.execute("LOAD httpfs;")
 con.execute("SET enable_http_metadata_cache=true;")
 
-HF_TOKEN = os.getenv("HF_TOKEN")
+HF_S3_KEY    = os.getenv("HF_S3_KEY")
+HF_S3_SECRET = os.getenv("HF_S3_SECRET")
 
-if HF_TOKEN:
-    # Force the Authorization header for all huggingface.co requests
+if HF_S3_KEY and HF_S3_SECRET:
     con.execute(f"""
-        CREATE OR REPLACE SECRET hf_http (
-            TYPE http,
-            SCOPE 'https://huggingface.co',
-            EXTRA_HTTP_HEADERS MAP {{
-                'Authorization': 'Bearer {HF_TOKEN}'
-            }}
+        CREATE OR REPLACE SECRET hf_s3 (
+            TYPE s3,
+            KEY_ID '{HF_S3_KEY}',
+            SECRET '{HF_S3_SECRET}',
+            ENDPOINT 's3.hf.co/usaomega1',
+            URL_STYLE 'path',
+            REGION 'us-east-1'
         );
     """)
-    print("Forced HTTP Authorization header secret created")
+    print("Hugging Face S3 secret created successfully")
 else:
-    print("WARNING: HF_TOKEN environment variable is missing!")
-# ------------------------------------------------
+    print("WARNING: HF_S3_KEY or HF_S3_SECRET missing!")
+# ----------------------------------------------
 
 LANDING_PAGE_HTML = """<!DOCTYPE html>
 <html>
 <head><title>Hitek Data Gateway</title></head>
 <body style="background:#050505;color:#00ffcc;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;">
   <div style="text-align:center;border:1px solid #00ffcc;padding:30px;border-radius:8px;">
-    <h2>SYSTEM ONLINE (KOYEB)</h2>
+    <h2>SYSTEM ONLINE (KOYEB S3)</h2>
     <p>Use: <code>/FetchData?Number=XXXXXXXXXX</code></p>
   </div>
 </body>
@@ -62,8 +63,10 @@ def fetch_data(Number: str = Query(None)):
         )
 
     last_digit = Number[-1]
-    primary_url = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet"
-    alt_url     = f"https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet"
+
+    # S3 paths for the bucket
+    primary_url = f"s3://hitek-data-bucket/final_master_shard_{last_digit}.parquet"
+    alt_url     = f"s3://hitek-data-bucket/alt_master_shard_{last_digit}.parquet"
 
     main_records = []
     alt_records  = []
