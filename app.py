@@ -1,5 +1,4 @@
 import os
-import random
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -8,18 +7,43 @@ import uvicorn
 
 app = FastAPI(title='Hitek Data Gateway')
 
-# Aapke tested aur working fast proxies
-PROXIES = [
-    "http://13.125.44.24:80",
-    "http://3.10.170.234:3128"
-]
+# Railway Environment Variables se aapka Hugging Face Token lega
+HF_TOKEN = os.environ.get("HF_TOKEN", "")
+
+# DuckDB Setup for Remote Streaming (NO FULL DOWNLOAD)
+con = duckdb.connect()
+con.execute('INSTALL httpfs;')
+con.execute('LOAD httpfs;')
+con.execute('SET enable_http_metadata_cache=true;')
+
+# WAF Bypass: Hugging Face API Token lagane se Range Requests block nahi hongi
+if HF_TOKEN:
+    con.execute(f"""
+        CREATE OR REPLACE SECRET hf_auth (
+            TYPE HTTP,
+            EXTRA_HTTP_HEADERS MAP {{
+                'Authorization': 'Bearer {HF_TOKEN}',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
+            }}
+        );
+    """)
+else:
+    print("WARNING: HF_TOKEN not found! Requests might be blocked by Cloudflare (403).")
+    con.execute("""
+        CREATE OR REPLACE SECRET hf_auth (
+            TYPE HTTP,
+            EXTRA_HTTP_HEADERS MAP {{
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
+            }}
+        );
+    """)
 
 LANDING_PAGE_HTML = """<!DOCTYPE html>
 <html>
 <head><title>Hitek Data Gateway</title></head>
 <body style="background:#050505;color:#00ffcc;font-family:monospace;display:flex;justify-content:center;align-items:center;height:100vh;">
   <div style="text-align:center;border:1px solid #00ffcc;padding:30px;border-radius:8px;">
-    <h2>SYSTEM ONLINE (PRO MODE)</h2>
+    <h2>SYSTEM ONLINE (REMOTE STREAMING)</h2>
     <p>Use: <code>/FetchData?Number=XXXXXXXXXX</code></p>
   </div>
 </body>
@@ -35,79 +59,34 @@ def root():
 
 @app.get('/FetchData')
 def fetch_data(Number: str = Query(None)):
+    # Basic Validation
     if not Number or not Number.isdigit() or len(Number) < 10 or len(Number) > 15:
         return JSONResponse(status_code=400, content={'status': 'rejected', 'message': 'Invalid parameter.'})
     
     last_digit = Number[-1]
     
-    # Original Sahi URLs (Hugging Face ke buckets wale)
+    # Direct Hugging Face URLs - DuckDB will auto-magically use HTTP Range Requests to read only required bytes!
     primary_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/final_master_shard_{last_digit}.parquet'
     alt_url = f'https://huggingface.co/buckets/CutehackX/hitek-data-bucket/resolve/alt_master_shard_{last_digit}.parquet'
     
     main_records = []
     alt_records = []
-    success = False
-    last_error = ""
     
-    proxies_to_try = PROXIES.copy()
-    random.shuffle(proxies_to_try)
-
-    for proxy in proxies_to_try:
-        try:
-            # DuckDB (cURL backend) ke liye OS level proxies set karna (Yeh sabse stable tareeqa hai)
-            os.environ['HTTP_PROXY'] = proxy
-            os.environ['HTTPS_PROXY'] = proxy
-            os.environ['ALL_PROXY'] = proxy
-            
-            # Har proxy try ke liye naya connection taaki pichla proxy cache na ho
-            con = duckdb.connect()
-            con.execute('INSTALL httpfs;')
-            con.execute('LOAD httpfs;')
-            con.execute('SET enable_http_metadata_cache=true;')
-            
-            # Headers set karna zaroori hai Hugging Face WAF ke liye
-            con.execute("""
-                CREATE OR REPLACE SECRET hf_headers (
-                    TYPE HTTP,
-                    EXTRA_HTTP_HEADERS MAP {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'}
-                );
-            """)
-            
-            try:
-                df_main = con.execute(f"SELECT * FROM read_parquet('{primary_url}') WHERE mobile = '{Number}' LIMIT 1").df()
-                if not df_main.empty:
-                    main_records = df_main.fillna('').astype(str).to_dict(orient='records')
-            except Exception as e:
-                raise Exception(f"Main DB Error via {proxy}: {e}")
-            
-            try:
-                df_alt = con.execute(f"SELECT * FROM read_parquet('{alt_url}') WHERE alt = '{Number}' LIMIT 1").df()
-                if not df_alt.empty:
-                    alt_records = df_alt.fillna('').astype(str).to_dict(orient='records')
-            except Exception as e:
-                raise Exception(f"Alt DB Error via {proxy}: {e}")
-
-            # Agar dono requests pass ho gayi (chahe data khali kyu na ho)
-            success = True
-            con.close()
-            break # Loop khatam, proxy kaam kar gayi
-
-        except Exception as e:
-            last_error = str(e)
-            print(f"Proxy Failed: {last_error}")
-            try:
-                con.close()
-            except:
-                pass
-            
-            # Environment variables clear karo agle try ke liye
-            if 'HTTP_PROXY' in os.environ: del os.environ['HTTP_PROXY']
-            if 'HTTPS_PROXY' in os.environ: del os.environ['HTTPS_PROXY']
-            if 'ALL_PROXY' in os.environ: del os.environ['ALL_PROXY']
-            continue 
-
-    if not success:
-        return JSONResponse(status_code=502, content={'status': 'error', 'message': 'All proxies failed or blocked.', 'details': last_error})
+    try:
+        # LIMIT 1 ensures it stops streaming instantly after finding the first match
+        df_main = con.execute(f"SELECT * FROM read_parquet('{primary_url}') WHERE mobile = '{Number}' LIMIT 1").df()
+        if not df_main.empty:
+            main_records = df_main.fillna('').astype(str).to_dict(orient='records')
+    except Exception as e:
+        print(f'Main DB Error: {e}')
+    
+    try:
+        # LIMIT 1 ensures it stops streaming instantly after finding the first match
+        df_alt = con.execute(f"SELECT * FROM read_parquet('{alt_url}') WHERE alt = '{Number}' LIMIT 1").df()
+        if not df_alt.empty:
+            alt_records = df_alt.fillna('').astype(str).to_dict(orient='records')
+    except Exception as e:
+        print(f'Alt DB Error: {e}')
 
     if not main_records and not alt_records:
         return JSONResponse(status_code=404, content={'status': 'not_found', 'phone': Number})
@@ -117,4 +96,3 @@ def fetch_data(Number: str = Query(None)):
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 8000))
     uvicorn.run(app, host='0.0.0.0', port=port)
-
